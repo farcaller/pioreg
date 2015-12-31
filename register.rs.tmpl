@@ -1,0 +1,195 @@
+{% macro register(r, names_cache) %}{{ r|validate_register }}
+
+// Register {{r.name}} implementation
+{% set RNAME = r|tyname %}
+
+/// Register `{{r.name}}`: {{r.description|replace("\n", " ")}}
+#[derive(Clone)]
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct {{RNAME}} {
+    value: ::volatile_cell::VolatileCell<u32>,
+}
+
+impl ::core::marker::Copy for {{RNAME}} { }
+
+impl {{RNAME}} {
+    {% if r.access != "write-only" -%}
+    {{ impl_getters(r, RNAME) }}
+    {% endif -%}
+
+    {% if r.access != "read-only" -%}
+    {{ impl_setters(r, RNAME) }}
+    {% endif -%}
+}
+
+{% if r.access != "write-only" -%}
+{{ getter(r, RNAME) }}
+{% endif -%}
+
+{% if r.access != "read-only" -%}
+{{ updater(r, RNAME) }}
+{% endif -%}
+
+{% for f in r|enum_fields -%}
+{% if f|tyname not in names_cache %}
+{% if names_cache.append(f|tyname) %}{% endif -%}
+#[derive(PartialEq)]
+#[allow(non_camel_case_types)]
+#[repr(u32)]
+pub enum {{f|tyname}} {
+    {% for e in f|accessible_enums -%}
+    /// {{e.description}}
+    {{e.name|sanitize_enum}} = {{e.value}},
+    {% endfor -%}
+}
+{% endif %}
+{% endfor -%}
+
+{% endmacro %}
+
+
+{% macro impl_getters(r, RNAME) %}
+    // Getters
+    {% set RNAME_Get = RNAME + "_Get" -%}
+
+    /// Fetch the value of the `{{r.name}}` register.
+    #[inline(always)]
+    pub fn get(&self) -> {{RNAME_Get}} {
+        {{RNAME_Get}}::new(self)
+    }
+
+    {% for f in r|accessible_fields %}
+    /// Get value of `{{f.name}}` field.
+    #[inline(always)]
+    pub fn {{f.name|sanitize_name}}(&self) -> {{f|field_ty}} {
+        {{RNAME_Get}}::new(self).{{f.name|sanitize_name}}()
+    }
+    {% endfor %}
+{% endmacro %}
+
+
+{% macro impl_setters(r, RNAME) %}
+    // Setters
+    {% set RNAME_Update = RNAME + "_Update" -%}
+
+    /// Create new updater that ignores current value of the `{{r.name}}` register.
+    #[inline(always)]
+    pub fn ignoring_state(&self) -> {{RNAME_Update}} {
+        {{RNAME_Update}}::new_ignoring_state(self)
+    }
+
+    {% for f in r|accessible_fields %}
+    /// Set value of `{{f.name}}` field.
+    #[inline(always)]
+    pub fn set_{{f.name|sanitize_name}}<'a>(&'a mut self, new_value: {{f|field_ty}}) -> {{RNAME_Update}}<'a> {
+        let mut setter: {{RNAME_Update}} = {{RNAME_Update}}::new(self);
+        setter.set_{{f.name|sanitize_name}}(new_value);
+        setter
+    }
+    {% endfor %}
+{% endmacro %}
+
+
+{% macro getter(r, RNAME) %}
+// Getter for {{RNAME}}
+{% set RNAME_Get = RNAME + "_Get" -%}
+
+/// `{{r.name}}`: {{r.description|replace("\n", " ")}}
+#[derive(Clone)]
+#[allow(non_camel_case_types)]
+pub struct {{RNAME_Get}} {
+    value: u32,
+}
+
+impl {{RNAME_Get}} {
+    /// Create a getter reflecting the current value of the given register.
+    #[inline(always)]
+    pub fn new(reg: &{{RNAME}}) -> {{RNAME_Get}} {
+        {{RNAME_Get}}{ value: reg.value.get() }
+    }
+
+    /// Get the raw value of the register.
+    #[inline(always)]
+    pub fn raw(&self) -> u32 { self.value }
+
+    {% for f in r|accessible_fields -%}
+    /// Get value of `{{f.name}}` field: {{f.description|replace("\n", " ")}}
+    #[inline(always)]
+    pub fn {{f.name|sanitize_name}}(&self) -> {{f|field_ty}} {
+        {% if f is enum -%}
+        match (self.value >> {{f.bitOffset}}) & {{f.bitWidth|mask}} {
+            {% for e in f|accessible_enums -%}
+            {{e.value}} => ::core::option::Option::Some({{f|tyname}}::{{e.name|sanitize_enum}}),
+            {% endfor -%}
+            _ => ::core::option::Option::None,
+        }.unwrap()
+        {% elif f.bitWidth == 1 -%}
+        (self.value >> {{f.bitOffset}}) & {{f.bitWidth}} != 0
+        {% else -%}
+        (self.value >> {{f.bitOffset}}) & {{f.bitWidth|mask}}
+        {% endif -%}
+    }
+    {% endfor -%}
+}
+
+impl ::core::marker::Copy for {{RNAME_Get}} { }
+{% endmacro %}
+
+
+{% macro updater(r, RNAME) %}
+// Updater for {{RNAME}}
+{% set RNAME_Update = RNAME + "_Update" -%}
+
+/// Updater for `{{r.name}}` register.
+#[allow(non_camel_case_types)]
+pub struct {{RNAME_Update}}<'a> {
+    value: u32,
+    mask: u32,
+    write_only: bool,
+    reg: &'a {{RNAME}},
+}
+
+/// This performs the register update.
+impl <'a> Drop for {{RNAME_Update}}<'a> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        let clear_mask: u32 = 0u32 as u32;
+        if self.mask != 0 {
+            let v: u32 =
+                if self.write_only { 0 } else { self.reg.value.get() } &
+                    !clear_mask & !self.mask;
+            self.reg.value.set(self.value | v);
+        }
+    }
+}
+
+impl <'a> {{RNAME_Update}}<'a> {
+    /// Create a new updater.
+    #[inline(always)]
+    pub fn new(reg: &'a {{RNAME}}) -> {{RNAME_Update}}<'a> {
+        {{RNAME_Update}}{ value: 0, mask: 0, write_only: false, reg: reg }
+    }
+
+    /// Create a new updater that ignores current state.
+    #[inline(always)]
+    pub fn new_ignoring_state(reg: &'a {{RNAME}}) -> {{RNAME_Update}}<'a> {
+        {{RNAME_Update}}{ value: 0, mask: 0, write_only: true, reg: reg }
+    }
+
+    {% for f in r|accessible_fields -%}
+    /// Set value of `{{f.name}}` field.
+    #[inline(always)]
+    pub fn set_{{f.name|sanitize_name}}<'b>(&'b mut self, new_value: {{f|field_ty}}) -> &'b mut {{RNAME_Update}}<'a> {
+        self.value = (self.value & !({{f.bitWidth|mask}} << {{f.bitOffset}}))
+                   | ((new_value as u32) & {{f.bitWidth|mask}}) << {{f.bitOffset}};
+        self.mask |= {{f.bitWidth|mask}} << {{f.bitOffset}};
+        self
+    }
+    {% endfor -%}
+
+    /// Commit changes to register.
+    #[inline(always)]
+    pub fn done(self) { }
+}
+{% endmacro %}

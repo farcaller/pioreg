@@ -1,0 +1,30 @@
+{% import 'register.rs.tmpl' as register %}
+{% macro peripheral(p, names_cache) -%}
+
+// Registers for {{p.name}}
+
+{% for r in p.registers %}
+{% if r|tyname not in names_cache %}
+{% if names_cache.append(r|tyname) %}{% endif -%}
+{{register.register(r, names_cache)}}
+{% endif %}
+{% endfor %}
+
+// Peripheral {{p.name}} implementation
+
+/// {{p.description|replace("\n", " ")}}
+#[allow(non_camel_case_types, missing_docs)]
+#[repr(C)]
+pub struct {{p|tyname}};
+
+impl {{p|tyname}} {
+    {% for r in p.registers -%}
+    /// {{r.description|replace("\n", " ")}}
+    #[inline(always)]
+    pub fn {{r.name|lower}}() -> &'static mut {{r|tyname}} {
+        unsafe { ::core::intrinsics::transmute({{"%#010x"|format(p.baseAddress+r.addressOffset)}} as usize) }
+    }
+    {% endfor -%}
+}
+
+{% endmacro -%}
